@@ -1,0 +1,451 @@
+:root {
+  color-scheme: light dark;
+  --bg: #0f1419;
+  --panel: #171d24;
+  --border: #2a3441;
+  --text: #e7edf4;
+  --muted: #93a1b3;
+  --accent: #5b9dff;
+  --ok: #3ecf8e;
+  --warn: #f5b942;
+  --fail: #ff6b6b;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at top, #1a2430, var(--bg));
+  color: var(--text);
+}
+
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+.hero h1 {
+  margin: 0 0 0.5rem;
+  font-size: 2rem;
+}
+
+.hero p {
+  color: var(--muted);
+  max-width: 720px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.25rem;
+  margin-top: 1rem;
+}
+
+.player-card {
+  border-color: #3d6fb3;
+  box-shadow: 0 0 0 1px rgba(91, 157, 255, 0.15);
+}
+
+.player-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+  margin-bottom: 1rem;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--accent);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.player-status {
+  color: var(--muted);
+  margin: 0.35rem 0 0;
+}
+
+#podcast-player {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+.progress-bar {
+  margin-top: 1rem;
+  height: 8px;
+  background: #0b1016;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 8%;
+  background: linear-gradient(90deg, var(--accent), #7eb6ff);
+  transition: width 0.4s ease;
+}
+
+.upload-row {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+button, .file-label, .download-link {
+  background: var(--accent);
+  color: #081018;
+  border: none;
+  border-radius: 10px;
+  padding: 0.65rem 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+button.secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.file-label input { display: none; }
+
+/* ---- Episode plan review ---- */
+.plan-card {
+  border-color: #6a5cb3;
+  box-shadow: 0 0 0 1px rgba(140, 120, 255, 0.15);
+}
+
+.plan-head h2 {
+  margin: 0.25rem 0 0.35rem;
+}
+
+.plan-sub {
+  margin: 0;
+  color: var(--muted);
+  max-width: 640px;
+}
+
+.plan-segments {
+  list-style: none;
+  counter-reset: plan;
+  margin: 1rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.plan-seg {
+  counter-increment: plan;
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem 0.7rem 2.6rem;
+  background: rgba(127, 127, 255, 0.04);
+}
+
+.plan-seg::before {
+  content: counter(plan);
+  position: absolute;
+  left: 0.85rem;
+  top: 0.7rem;
+  width: 1.3rem;
+  height: 1.3rem;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #081018;
+  font-size: 0.8rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.plan-seg-title { font-weight: 600; }
+.plan-seg-goal { color: var(--muted); font-size: 0.88rem; margin-top: 0.15rem; }
+
+.plan-directive {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.plan-directive label {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.plan-directive textarea {
+  width: 100%;
+  resize: vertical;
+  background: #0b1016;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.75rem;
+  font-family: inherit;
+  font-size: 0.92rem;
+}
+
+.plan-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.plan-status {
+  margin: 0.7rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  min-height: 1.1rem;
+}
+
+.details-toggle {
+  width: 100%;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.details-panel { margin-top: 1rem; }
+
+.hidden { display: none !important; }
+
+.stages { display: grid; gap: 0.5rem; margin: 1rem 0; }
+
+.stage {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.stage-name { font-weight: 600; }
+.stage-msg { color: var(--muted); font-size: 0.9rem; }
+
+.badge {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.badge.running { color: var(--warn); }
+.badge.completed { color: var(--ok); }
+.badge.failed { color: var(--fail); }
+.badge.pending { color: var(--muted); }
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 900px) {
+  .grid-2 { grid-template-columns: 1fr; }
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+
+.turn {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.turn .speaker {
+  color: var(--accent);
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.empty { color: var(--muted); }
+.error { color: var(--fail); }
+
+.join-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+
+#join-btn {
+  background: var(--ok);
+}
+
+#join-btn.recording {
+  background: var(--fail);
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.join-hint {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.transcript {
+  margin-top: 1rem;
+  max-height: 360px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+
+.t-turn {
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 8px;
+  align-items: baseline;
+}
+
+.t-turn.active {
+  background: rgba(91, 157, 255, 0.12);
+}
+
+.t-speaker {
+  font-weight: 700;
+  text-transform: capitalize;
+  font-size: 0.8rem;
+  min-width: 48px;
+}
+
+.t-speaker.host { color: var(--accent); }
+.t-speaker.guest { color: var(--ok); }
+
+.t-text { color: var(--text); }
+
+.interjection {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border: 1px dashed var(--accent);
+  border-radius: 10px;
+  background: rgba(91, 157, 255, 0.06);
+}
+
+.interjection .you {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.interjection .ungrounded { color: var(--warn); font-weight: 400; }
+
+.interjection.answering {
+  border-color: var(--ok);
+  background: rgba(62, 207, 142, 0.08);
+  box-shadow: 0 0 0 1px rgba(62, 207, 142, 0.25);
+}
+
+.ij-label {
+  display: inline-block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  margin-bottom: 0.5rem;
+}
+
+.ij-label.answering-label {
+  color: var(--ok);
+  border-color: var(--ok);
+  animation: pulse 1.1s infinite;
+}
+
+.ij-footer {
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.ij-footer::before { content: "\21a9  "; }
+
+/* Agent trace: shows the tool calls the model decided to make. */
+.trace {
+  margin-top: 0.7rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.06);
+  font-size: 0.78rem;
+}
+
+.trace > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.01em;
+}
+
+.trace.trace-empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.trace-step {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: baseline;
+  margin-top: 0.45rem;
+  padding-left: 0.2rem;
+}
+
+.trace-tool {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.trace-args {
+  color: var(--text);
+  font-style: italic;
+}
+
+.trace-result {
+  color: var(--muted);
+  flex-basis: 100%;
+  padding-left: 0.2rem;
+}
+
+.trace-url {
+  flex-basis: 100%;
+  padding-left: 0.2rem;
+  font-size: 0.72rem;
+  color: var(--accent);
+  opacity: 0.85;
+  word-break: break-all;
+}
+
+/* Dim the live transcript while an answer is playing, so focus is on the answer. */
+.player-card.answering-mode .transcript > .t-turn { opacity: 0.35; }
+.player-card.answering-mode .interjection.answering { opacity: 1; }
