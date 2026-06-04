@@ -14,14 +14,21 @@ from app.models import (
 )
 from app.services.document_parser import DocumentParser
 from app.services.summary_service import OpenAIClient, SummaryService
+from app.services.text_utils import clean_for_speech
 from app.services.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
 
 class PlannerService:
-    def __init__(self, client: OpenAIClient | None = None) -> None:
+    def __init__(
+        self,
+        client: OpenAIClient | None = None,
+        kb: PaperKB | None = None,
+    ) -> None:
         self.client = client or OpenAIClient()
+        self.kb = kb
+        self.last_revision_trace = []
 
     def plan(self, doc: ParsedDocument, brief: PaperBrief) -> PodcastOutline:
         if self.client.enabled:
@@ -65,13 +72,101 @@ class PlannerService:
         if not instruction or not self.client.enabled:
             return current
 
+        payload = self._revise_with_search_agent(brief, current, instruction)
+        if not payload:
+            payload = self._revise_with_retrieved_context(brief, current, instruction)
+
+        outline = self._outline_from_payload(payload, current.paper_id, brief)
+        return outline if outline is not None else current
+
+    def _revise_with_search_agent(
+        self,
+        brief: PaperBrief,
+        current: PodcastOutline,
+        instruction: str,
+    ) -> dict:
+        if self.kb is None:
+            return {}
+
+        try:
+            from app.services.agent_runner import AgentRunner, extract_json
+            from app.services.tools import ToolRegistry, make_search_paper_kb
+
+            registry = ToolRegistry().add(
+                make_search_paper_kb(self.kb, current.paper_id, default_top_k=4)
+            )
+            runner = AgentRunner(
+                self.client,
+                registry,
+                max_iters=3,
+                temperature=0.35,
+                required_first_tool="search_paper_kb",
+            )
+            result = runner.run(
+                system=(
+                    "You revise a podcast episode plan for a research paper. "
+                    "The user's instruction is a retrieval target, not just a style note. "
+                    "First search the paper KB for passages related to what the user wants "
+                    "added, removed, or emphasized. Use the retrieved chunks to decide how "
+                    "the outline should change. If the paper does not support the requested "
+                    "focus, say so indirectly by keeping the plan grounded and avoiding "
+                "invented claims. If the user asks for MORE detail on one topic, do not "
+                "collapse the episode to one short segment; expand that topic into 3-4 "
+                "focused sub-segments such as setup, variants/components, results, and "
+                "takeaway. Preserve depth unless the user explicitly asks for a shorter "
+                "episode. Return ONLY JSON: episode_title, hook, closing, "
+                    "segments (array of {segment_id, title, goal, retrieval_queries, "
+                    "estimated_seconds})."
+                ),
+                user=json.dumps(
+                    {
+                        "paper_title": brief.title,
+                        "one_liner": brief.one_liner,
+                        "themes": brief.themes,
+                        "key_terms": brief.key_terms,
+                        "current_plan": current.model_dump(),
+                        "user_instruction": instruction,
+                        "search_guidance": (
+                            "Search for the specific topic, examples, tests, cases, "
+                            "limitations, or methods named by the user. Prefer queries "
+                            "that could match wording inside the uploaded paper."
+                        ),
+                    },
+                    indent=2,
+                ),
+            )
+            self.last_revision_trace = result.trace
+            return extract_json(result.content)
+        except Exception as exc:
+            logger.warning("Tool-based outline revision failed: %s", exc)
+            self.last_revision_trace = []
+            return {}
+
+    def _revise_with_retrieved_context(
+        self,
+        brief: PaperBrief,
+        current: PodcastOutline,
+        instruction: str,
+    ) -> dict:
+        evidence = []
+        if self.kb is not None:
+            queries = [
+                instruction,
+                f"{instruction} {brief.title}",
+                *brief.key_terms[:3],
+            ]
+            evidence = self.kb.search(current.paper_id, queries, top_k=4)
+
         payload = self.client.generate_json(
             system=(
                 "You revise a podcast episode plan for a research paper based on the "
                 "user's instruction. The user decides what the episode should cover. "
                 "Apply the instruction faithfully: remove, add, reorder, retitle, refocus, "
-                "merge, or re-scope segments as asked. Keep segments grounded in the paper "
-                "and regenerate retrieval_queries so each segment can fetch the right "
+                "merge, or re-scope segments as asked. Use the retrieved paper evidence "
+                "to understand the exact topic the user requested. Keep segments grounded in the paper. "
+                "If the user asks for more detail on one topic, create multiple focused "
+                "sub-segments for that topic instead of a single short segment. "
+                "Regenerate retrieval_queries so each segment can fetch the right "
                 "evidence. Do NOT invent findings not implied by the brief. "
                 "Return JSON: episode_title, hook, closing, segments (array of "
                 "{segment_id, title, goal, retrieval_queries, estimated_seconds})."
@@ -84,13 +179,13 @@ class PlannerService:
                     "key_terms": brief.key_terms,
                     "current_plan": current.model_dump(),
                     "user_instruction": instruction,
+                    "retrieved_revision_evidence": evidence,
                 },
                 indent=2,
             ),
             temperature=0.4,
         )
-        outline = self._outline_from_payload(payload, current.paper_id, brief)
-        return outline if outline is not None else current
+        return payload
 
     def _outline_from_payload(
         self, payload: dict, paper_id: str, brief: PaperBrief
@@ -165,6 +260,8 @@ class PlannerService:
 class PaperKB:
     """The search_paper_kb tool: retrieves grounded evidence from one paper."""
 
+    EVIDENCE_CHAR_LIMIT = 1400
+
     def __init__(self, vector_store: VectorStore | None = None) -> None:
         self.vector_store = vector_store or VectorStore()
 
@@ -174,7 +271,7 @@ class PaperKB:
             {
                 "chunk_id": hit.chunk_id,
                 "score": round(hit.score, 3),
-                "text": hit.text[:500],
+                "text": hit.text[: self.EVIDENCE_CHAR_LIMIT],
             }
             for hit in hits
         ]
@@ -262,6 +359,22 @@ class DialogueService:
         last_turns: list[dict],
         directive: str = "",
     ) -> tuple[list[dict], str]:
+        if self.client.enabled:
+            turns, recap = self._write_beat_with_search_agent(
+                role=role,
+                position=position,
+                total=total,
+                seg=seg,
+                brief=brief,
+                outline=outline,
+                seed_evidence=evidence,
+                covered_points=covered_points,
+                last_turns=last_turns,
+                directive=directive,
+            )
+            if turns:
+                return turns, recap
+
         if self.client.enabled and evidence:
             role_rules = {
                 "opening": (
@@ -292,6 +405,9 @@ class DialogueService:
                 "'guest' (the expert, explains with evidence). "
                 "Ground every paper-specific claim in the provided evidence chunks; cite the "
                 "chunk_ids you used in source_chunk_ids. Keep turns short and spoken (under ~45 words). "
+                "Be specific: if evidence contains named variants, datasets, tasks, metrics, "
+                "or result deltas, mention the important ones instead of summarizing vaguely. "
+                "Avoid filler phrases like 'that's fascinating' and do not repeat the same idea. "
                 "It must read as a continuation of one ongoing conversation, never a fresh episode. "
                 f"{role_rules} {directive_rule}"
                 "Return JSON: {turns: [{speaker, text, source_chunk_ids}], recap: one short sentence "
@@ -323,6 +439,96 @@ class DialogueService:
 
         return self._fallback_beat(role, seg, brief, evidence)
 
+    def _write_beat_with_search_agent(
+        self,
+        role: str,
+        position: int,
+        total: int,
+        seg: OutlineSegment,
+        brief: PaperBrief,
+        outline: PodcastOutline,
+        seed_evidence: list[dict],
+        covered_points: list[str],
+        last_turns: list[dict],
+        directive: str = "",
+    ) -> tuple[list[dict], str]:
+        try:
+            from app.services.agent_runner import AgentRunner, extract_json
+            from app.services.tools import ToolRegistry, make_search_paper_kb
+
+            registry = ToolRegistry().add(
+                make_search_paper_kb(self.kb, outline.paper_id, default_top_k=4)
+            )
+            runner = AgentRunner(
+                self.client,
+                registry,
+                max_iters=3,
+                temperature=0.45,
+                required_first_tool="search_paper_kb",
+            )
+
+            role_rules = {
+                "opening": (
+                    "This is the opening beat. Greet once, then get concrete quickly."
+                ),
+                "middle": (
+                    "This is a middle beat. Continue from the previous turns; do not greet."
+                ),
+                "closing": (
+                    "This is the closing beat. Synthesize only what has been covered; do not introduce a new topic."
+                ),
+            }[role]
+
+            system = (
+                "You are a research-podcast writing agent. Your job is not to make a "
+                "generic explainer; it is to faithfully summarize this paper section for "
+                "spoken dialogue. First search the paper KB for the exact beat focus. "
+                "Then extract concrete evidence notes before writing: setup/context, named "
+                "components or variants, tasks/datasets, metrics or result changes, and the "
+                "paper's interpretation. Use only details supported by the retrieved chunks. "
+                "If evidence contains concrete names or numbers, include the important ones. "
+                "If evidence is weak, say less rather than invent. Avoid filler like "
+                "'fascinating', 'innovative', and repeated generic collaboration takeaways. "
+                "Keep each turn under ~45 words, cite source_chunk_ids structurally, and never "
+                "put chunk IDs in spoken text. "
+                f"{role_rules} "
+                "Return ONLY JSON: {evidence_notes: [str], turns: [{speaker, text, "
+                "source_chunk_ids}], recap: str}."
+            )
+            user = json.dumps(
+                {
+                    "paper_title": brief.title,
+                    "episode_title": outline.episode_title,
+                    "user_directive": directive,
+                    "beat_position": f"{position} of {total}",
+                    "beat_title": seg.title,
+                    "beat_goal": seg.goal,
+                    "beat_retrieval_queries": seg.retrieval_queries,
+                    "points_already_covered": covered_points,
+                    "last_turns": last_turns,
+                    "seed_evidence": seed_evidence[:3],
+                    "writing_goal": (
+                        "Write a natural host/guest beat that explains the specific paper evidence, "
+                        "not a broad thematic summary."
+                    ),
+                },
+                indent=2,
+            )
+
+            result = runner.run(system, user)
+            payload = extract_json(result.content)
+            turns = self._normalize_turns(payload.get("turns"))
+            if not turns:
+                return [], ""
+            recap = str(payload.get("recap") or "").strip()
+            if not recap:
+                notes = payload.get("evidence_notes") or []
+                recap = str(notes[0]) if notes else f"Discussed {seg.title.lower()}."
+            return turns, recap
+        except Exception as exc:
+            logger.warning("Agentic beat writing failed: %s", exc)
+            return [], ""
+
     def _normalize_turns(self, turns) -> list[dict]:
         if not isinstance(turns, list):
             return []
@@ -330,7 +536,7 @@ class DialogueService:
         for turn in turns[: self.MAX_TURNS_PER_BEAT]:
             if not isinstance(turn, dict):
                 continue
-            text = str(turn.get("text") or "").strip()
+            text = clean_for_speech(str(turn.get("text") or ""))
             if not text:
                 continue
             normalized.append(
@@ -350,7 +556,7 @@ class DialogueService:
         evidence: list[dict],
     ) -> tuple[list[dict], str]:
         chunk_ids = [e["chunk_id"] for e in evidence[:2]]
-        snippet = evidence[0]["text"][:220] if evidence else brief.one_liner
+        snippet = clean_for_speech(evidence[0]["text"][:220]) if evidence else brief.one_liner
 
         if role == "opening":
             opener = {
@@ -435,7 +641,7 @@ class PipelineOrchestrator:
         self.vector_store = VectorStore()
         self.kb = PaperKB(self.vector_store)
         self.summary = SummaryService()
-        self.planner = PlannerService()
+        self.planner = PlannerService(kb=self.kb)
         self.dialogue = DialogueService(kb=self.kb)
         self.artifacts = ArtifactStore()
         self.status = StatusStore()

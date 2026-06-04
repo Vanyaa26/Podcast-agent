@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -103,7 +104,7 @@ class InterruptAgent:
         context_topic = current_cue.segment_title if current_cue else ""
 
         if not self.client.enabled:
-            return self._fallback(paper_id, question, current_cue)
+            return self._fallback(paper_id, question, current_cue, recent_turns)
 
         registry = (
             ToolRegistry()
@@ -169,7 +170,9 @@ class InterruptAgent:
             return grounded, answer_turns, result.trace
 
         # Model produced nothing usable: fall back, but keep whatever trace exists.
-        grounded, turns, fb_trace = self._fallback(paper_id, question, current_cue)
+        grounded, turns, fb_trace = self._fallback(
+            paper_id, question, current_cue, recent_turns
+        )
         return grounded, turns, result.trace or fb_trace
 
     @staticmethod
@@ -180,7 +183,8 @@ class InterruptAgent:
         for turn in turns[:4]:
             if not isinstance(turn, dict):
                 continue
-            text = str(turn.get("text") or "").strip()
+            clean_turn = sanitize_spoken_turn(turn)
+            text = clean_turn["text"]
             if not text:
                 continue
             parsed.append(
@@ -197,11 +201,13 @@ class InterruptAgent:
         paper_id: str,
         question: str,
         current_cue: TurnCue | None,
+        recent_turns: list[dict] | None = None,
     ) -> tuple[bool, list[AnswerTurn], list[ToolCallTrace]]:
-        """Deterministic safety net when the LLM is unavailable.
+        """Safety net when the full tool loop cannot produce a usable answer.
 
-        We still perform a real retrieval (so the trace is honest) and surface
-        the evidence verbatim or decline — never invent claims.
+        We still perform a real retrieval so the trace is honest. If the LLM is
+        available, use a simpler grounded answer prompt; otherwise return a clean
+        extractive fallback instead of reading raw chunk text aloud.
         """
         queries = [question]
         if current_cue is not None:
@@ -224,12 +230,26 @@ class InterruptAgent:
         ]
 
         if evidence:
+            answer_turns = self._answer_from_evidence(
+                question=question,
+                current_cue=current_cue,
+                recent_turns=recent_turns or [],
+                evidence=evidence,
+            )
+            if answer_turns:
+                return True, answer_turns, trace
+
+            snippet = clean_for_speech(evidence[0]["text"][:240])
+            excerpt = self._best_evidence_excerpt(question, snippet)
             return (
                 True,
                 [
                     AnswerTurn(
                         speaker="guest",
-                        text=f"From the paper: {evidence[0]['text'][:240]}",
+                        text=(
+                            "The closest paper passage points to this idea: "
+                            f"{excerpt}"
+                        ),
                         source_chunk_ids=[evidence[0]["chunk_id"]],
                     )
                 ],
@@ -246,3 +266,58 @@ class InterruptAgent:
             ],
             trace,
         )
+
+    def _answer_from_evidence(
+        self,
+        question: str,
+        current_cue: TurnCue | None,
+        recent_turns: list[dict],
+        evidence: list[dict],
+    ) -> list[AnswerTurn]:
+        if not self.client.enabled:
+            return []
+
+        payload = self.client.generate_json(
+            system=(
+                "You are answering a listener interruption inside an ongoing research "
+                "podcast. Use ONLY the provided paper evidence and recent transcript. "
+                "Do not quote raw chunks. Explain the concept in plain speech, connect it "
+                "to the paper, and keep it concise. If the listener asks about a term from "
+                "the paper, define the term and then explain how the paper uses it. "
+                "Return JSON: {turns: [{speaker: 'host'|'guest', text: str, "
+                "source_chunk_ids: [str]}]}."
+            ),
+            user=json.dumps(
+                {
+                    "listener_question": question,
+                    "current_segment": current_cue.segment_title if current_cue else "",
+                    "last_said_on_air": current_cue.text if current_cue else "",
+                    "recent_transcript": recent_turns[-6:],
+                    "paper_evidence": evidence[:4],
+                },
+                indent=2,
+            ),
+            temperature=0.25,
+        )
+        return self._parse_turns(payload.get("turns"))
+
+    @staticmethod
+    def _best_evidence_excerpt(question: str, text: str, max_len: int = 220) -> str:
+        text = clean_for_speech(text)
+        terms = {
+            token.lower()
+            for token in re.findall(r"[A-Za-z]{4,}", question)
+            if token.lower() not in {"what", "meaning", "still", "understand"}
+        }
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        if not sentences:
+            return text[:max_len].strip()
+        ranked = sorted(
+            sentences,
+            key=lambda s: sum(term in s.lower() for term in terms),
+            reverse=True,
+        )
+        excerpt = ranked[0]
+        if len(excerpt) > max_len:
+            excerpt = excerpt[:max_len].rsplit(" ", 1)[0]
+        return excerpt.strip()

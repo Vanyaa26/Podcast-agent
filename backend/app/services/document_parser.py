@@ -30,7 +30,21 @@ def _split_sentences(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def chunk_text(text: str, paper_id: str, chunk_size: int = 900, overlap: int = 120) -> list[ChunkRecord]:
+def _overlap_sentences(sentences: list[str], max_chars: int) -> list[str]:
+    if max_chars <= 0:
+        return []
+    tail: list[str] = []
+    total = 0
+    for sentence in reversed(sentences):
+        next_total = total + len(sentence)
+        if tail and next_total > max_chars:
+            break
+        tail.insert(0, sentence)
+        total = next_total
+    return tail
+
+
+def chunk_text(text: str, paper_id: str, chunk_size: int = 1600, overlap: int = 300) -> list[ChunkRecord]:
     sentences = _split_sentences(text)
     chunks: list[ChunkRecord] = []
     current: list[str] = []
@@ -49,8 +63,8 @@ def chunk_text(text: str, paper_id: str, chunk_size: int = 900, overlap: int = 1
                 )
             )
             idx += 1
-            tail = body[-overlap:] if overlap else ""
-            current = [tail, sentence] if tail else [sentence]
+            tail = _overlap_sentences(current, overlap)
+            current = [*tail, sentence]
             current_len = sum(len(s) for s in current)
         else:
             current.append(sentence)

@@ -4,6 +4,8 @@ Run: python -m tests.test_agentic   (from backend/, venv active)
 """
 from __future__ import annotations
 
+import json
+
 from app.models import OutlineSegment, PaperBrief, ParsedDocument, PodcastOutline
 from app.services.pipeline import DialogueService, PaperKB, PlannerService
 from app.services.summary_service import OpenAIClient
@@ -69,6 +71,24 @@ def test_single_greeting_and_roles():
     # Every segment carries a recap (running memory feed-forward).
     assert all(s.recap for s in script.segments), "each beat should emit a recap"
     print("test_single_greeting_and_roles: OK")
+
+
+def test_chunk_overlap_keeps_sentence_boundaries():
+    from app.services.document_parser import chunk_text
+
+    text = (
+        "First sentence explains the setup. "
+        "Second sentence lists components. "
+        "Third sentence gives results. "
+        "Fourth sentence gives the takeaway."
+    )
+    chunks = chunk_text(text, "p1", chunk_size=70, overlap=50)
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert not chunk.text.startswith("entence"), chunk.text
+        assert not chunk.text.startswith("omponents"), chunk.text
+    print("test_chunk_overlap_keeps_sentence_boundaries: OK")
 
 
 class _OneShotToolClient(OpenAIClient):
@@ -215,6 +235,109 @@ class _KbThenWebClient(OpenAIClient):
         return {"role": "assistant", "content": self._final}, []
 
 
+class _FallbackAnswerClient(OpenAIClient):
+    def __init__(self) -> None:
+        self.enabled = True
+
+    def generate_json(self, system, user, temperature=0.3):
+        return {
+            "turns": [
+                {
+                    "speaker": "guest",
+                    "text": (
+                        "An ablation is a controlled test where parts of the system are "
+                        "removed or changed to see which component is responsible for the result."
+                    ),
+                    "source_chunk_ids": ["auto_c2"],
+                },
+                {
+                    "speaker": "host",
+                    "text": "So for AutoScientist, it helps explain what each agent or mechanism contributes.",
+                    "source_chunk_ids": ["auto_c2"],
+                },
+            ]
+        }
+
+
+class _RawChunkKB(PaperKB):
+    def __init__(self) -> None:
+        pass
+
+    def search(self, paper_id, queries, top_k=3):
+        return [
+            {
+                "chunk_id": "auto_c2",
+                "score": 0.91,
+                "text": (
+                    "t be tracked to avoid repeated exploration. The ablation studies "
+                    "remove individual AutoScientist components to test their contribution."
+                ),
+            }
+        ]
+
+
+class _BeatSearchClient(OpenAIClient):
+    def __init__(self, payload: dict) -> None:
+        self.enabled = True
+        self._payload = payload
+        self.calls = 0
+        self.first_tool_choice = None
+
+    def chat_with_tools(self, messages, tools=None, temperature=0.4, tool_choice="auto"):
+        self.calls += 1
+        if self.calls == 1:
+            self.first_tool_choice = tool_choice
+            return (
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "beat_search",
+                            "type": "function",
+                            "function": {
+                                "name": "search_paper_kb",
+                                "arguments": '{"queries": ["AUTOSCIENTISTS ablations no analyst cross-agent feedback"], "top_k": 4}',
+                            },
+                        }
+                    ],
+                },
+                [
+                    {
+                        "id": "beat_search",
+                        "name": "search_paper_kb",
+                        "arguments": {
+                            "queries": [
+                                "AUTOSCIENTISTS ablations no analyst cross-agent feedback"
+                            ],
+                            "top_k": 4,
+                        },
+                    }
+                ],
+            )
+        return {"role": "assistant", "content": json.dumps(self._payload)}, []
+
+
+class _AblationKB(PaperKB):
+    def __init__(self) -> None:
+        pass
+
+    def search(self, paper_id, queries, top_k=3):
+        self.queries = queries
+        return [
+            {
+                "chunk_id": "auto_c8",
+                "score": 0.96,
+                "text": (
+                    "The ablations remove one component at a time: No analyst, "
+                    "No cross-agent feedback, No self-organization, and Independent agents. "
+                    "Removing the analyst is most damaging on TDC-hERG, while independent "
+                    "agents are most damaging on Cell-Cell Communication."
+                ),
+            }
+        ]
+
+
 def test_web_search_tool():
     from app.services.tools import make_web_search
 
@@ -246,6 +369,93 @@ def test_agent_kb_then_web():
     payload = extract_json(result.content)
     assert "RAG" in payload["turns"][0]["text"]
     print("test_agent_kb_then_web: OK")
+
+
+def test_interrupt_fallback_synthesizes_evidence():
+    from app.services.interaction_service import InterruptAgent
+
+    agent = InterruptAgent(client=_FallbackAnswerClient(), kb=_RawChunkKB())
+    grounded, turns, trace = agent._fallback(
+        "p1",
+        "I still don't understand the meaning of ablations of AutoScientist.",
+        None,
+        [],
+    )
+
+    assert grounded
+    assert trace[0].tool == "search_paper_kb"
+    answer = " ".join(turn.text for turn in turns)
+    assert "controlled test" in answer
+    assert "From the paper: t be tracked" not in answer
+    print("test_interrupt_fallback_synthesizes_evidence: OK")
+
+
+def test_agentic_script_beat_uses_specific_paper_evidence():
+    brief = PaperBrief(
+        paper_id="p1",
+        title="AUTOSCIENTISTS",
+        one_liner="A self-organizing agent team for scientific experimentation.",
+        problem="Long-running experiments require coordination.",
+        method="Agents collaborate through shared state and feedback.",
+        results="Ablations show components contribute differently.",
+        limitations="See paper.",
+    )
+    outline = PodcastOutline(
+        paper_id="p1",
+        episode_title="Ablations of AUTOSCIENTISTS",
+        hook="Let's unpack which parts actually matter.",
+        segments=[
+            OutlineSegment(
+                segment_id="ablations",
+                title="Ablations of AUTOSCIENTISTS",
+                goal="Explain the ablation setup, removed components, and task-specific findings.",
+                retrieval_queries=[
+                    "AUTOSCIENTISTS ablations no analyst cross-agent feedback independent agents"
+                ],
+                estimated_seconds=120,
+            )
+        ],
+        closing="That is what the ablations show.",
+    )
+    payload = {
+        "evidence_notes": [
+            "The ablation setup removes one component at a time while holding other factors fixed."
+        ],
+        "turns": [
+            {
+                "speaker": "host",
+                "text": "Here, ablation means removing one part of AUTOSCIENTISTS at a time to see what breaks.",
+                "source_chunk_ids": ["auto_c8"],
+            },
+            {
+                "speaker": "guest",
+                "text": "The four cuts are No analyst, No cross-agent feedback, No self-organization, and Independent agents.",
+                "source_chunk_ids": ["auto_c8"],
+            },
+            {
+                "speaker": "guest",
+                "text": "The failures differ by task: removing the analyst hurts TDC-hERG most, while independent agents hurt Cell-Cell Communication most.",
+                "source_chunk_ids": ["auto_c8"],
+            },
+        ],
+        "recap": "Explained the ablation setup, four component removals, and task-specific findings.",
+    }
+    kb = _AblationKB()
+    client = _BeatSearchClient(payload)
+    service = DialogueService(client=client, kb=kb)
+
+    script = service.generate(brief, outline)
+
+    all_text = " ".join(turn.text for turn in script.segments[0].turns)
+    assert client.first_tool_choice == {
+        "type": "function",
+        "function": {"name": "search_paper_kb"},
+    }
+    assert "ablations" in " ".join(kb.queries).lower()
+    assert "No analyst" in all_text
+    assert "Cell-Cell Communication" in all_text
+    assert "fascinating" not in all_text.lower()
+    print("test_agentic_script_beat_uses_specific_paper_evidence: OK")
 
 
 def test_agent_executes_tool_then_answers():
@@ -329,6 +539,62 @@ class _ReviseClient(OpenAIClient):
         return self._payload
 
 
+class _RecordingKB(PaperKB):
+    def __init__(self) -> None:
+        pass
+
+    def search(self, paper_id, queries, top_k=3):
+        self.paper_id = paper_id
+        self.queries = queries
+        self.top_k = top_k
+        return [
+            {
+                "chunk_id": "p1_c7",
+                "score": 0.92,
+                "text": "The paper includes task-specific test cases and qualitative examples.",
+            }
+        ]
+
+
+class _ReviseToolClient(OpenAIClient):
+    """Forces the planner to search first, then returns a revised outline."""
+
+    def __init__(self, payload: dict) -> None:
+        self.enabled = True
+        self._payload = payload
+        self.calls = 0
+        self.first_tool_choice = None
+
+    def chat_with_tools(self, messages, tools=None, temperature=0.4, tool_choice="auto"):
+        self.calls += 1
+        if self.calls == 1:
+            self.first_tool_choice = tool_choice
+            return (
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "revise_search",
+                            "type": "function",
+                            "function": {
+                                "name": "search_paper_kb",
+                                "arguments": '{"queries": ["test cases specific researches"], "top_k": 4}',
+                            },
+                        }
+                    ],
+                },
+                [
+                    {
+                        "id": "revise_search",
+                        "name": "search_paper_kb",
+                        "arguments": {"queries": ["test cases specific researches"], "top_k": 4},
+                    }
+                ],
+            )
+        return {"role": "assistant", "content": json.dumps(self._payload)}, []
+
+
 def test_revise_applies_user_instruction():
     _, brief, outline = _make_inputs()
     revised_payload = {
@@ -356,6 +622,38 @@ def test_revise_applies_user_instruction():
     # The user's instruction must actually reach the agent.
     assert "case study" in (client.last_user or "").lower()
     print("test_revise_applies_user_instruction: OK")
+
+
+def test_revise_searches_paper_for_user_focus():
+    _, brief, outline = _make_inputs()
+    revised_payload = {
+        "episode_title": "Focused: Test Cases",
+        "hook": "Let's focus on how the paper tests the idea.",
+        "closing": "That's the evidence from the test cases.",
+        "segments": [
+            {
+                "segment_id": "s_tests",
+                "title": "Task-specific test cases",
+                "goal": "Use retrieved paper evidence to discuss the requested test cases",
+                "retrieval_queries": ["task-specific test cases", "qualitative examples"],
+                "estimated_seconds": 120,
+            }
+        ],
+    }
+    kb = _RecordingKB()
+    client = _ReviseToolClient(revised_payload)
+    planner = PlannerService(client=client, kb=kb)
+
+    result = planner.revise(brief, outline, "I want more test cases specific researches.")
+
+    assert client.first_tool_choice == {
+        "type": "function",
+        "function": {"name": "search_paper_kb"},
+    }
+    assert "test cases" in " ".join(kb.queries)
+    assert planner.last_revision_trace[0].tool == "search_paper_kb"
+    assert result.segments[0].title == "Task-specific test cases"
+    print("test_revise_searches_paper_for_user_focus: OK")
 
 
 def test_revise_noops_without_client_or_instruction():
@@ -386,14 +684,18 @@ def test_cue_timing_math():
 
 
 if __name__ == "__main__":
+    test_chunk_overlap_keeps_sentence_boundaries()
     test_single_greeting_and_roles()
     test_agent_executes_tool_then_answers()
     test_required_first_tool_choice()
     test_agent_budget_guard()
     test_extract_json_tolerates_fences()
     test_revise_applies_user_instruction()
+    test_revise_searches_paper_for_user_focus()
     test_revise_noops_without_client_or_instruction()
     test_web_search_tool()
     test_agent_kb_then_web()
+    test_interrupt_fallback_synthesizes_evidence()
+    test_agentic_script_beat_uses_specific_paper_evidence()
     test_cue_timing_math()
     print("ALL DETERMINISTIC TESTS PASSED")
